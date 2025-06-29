@@ -8,6 +8,7 @@ This project implements a Model Context Protocol (MCP) server that provides tool
 -   **Search Reddit**: Search for posts across all of Reddit or within a specific subreddit.
 -   **Get Comments**: Fetch comments from a specific Reddit submission.
 -   **Reply to Comment**: Post a reply to an existing Reddit comment.
+-   **Fetch Reddit Post Content**: Fetch detailed content of a specific Reddit post, including a comment tree, using the `redditwarp` library.
 
 ## Setup
 
@@ -27,6 +28,7 @@ This project implements a Model Context Protocol (MCP) server that provides tool
     ```bash
     uv sync
     ```
+   This will install `praw`, `fastmcp`, `python-dotenv`, and `redditwarp`.
 
 ## Reddit API Configuration
 
@@ -34,6 +36,10 @@ You need to set up Reddit API credentials for your application. These can be obt
 
 
 ## Running the MCP Server
+
+The server uses both `PRAW` (for `get_saved_posts`, `search_reddit`, `get_comments`, `reply_to_comment`) and `redditwarp` (for `fetch_reddit_post_content`) to interact with the Reddit API.
+
+### `PRAW` API Configuration
 
 ```json
 {
@@ -55,7 +61,7 @@ You need to set up Reddit API credentials for your application. These can be obt
 }
 ```
 
-**Note:** Replace `YOUR_REDDIT_CLIENT_ID`, `YOUR_REDDIT_CLIENT_SECRET`, `YOUR_REDDIT_USERNAME`, and `YOUR_REDDIT_PASSWORD` with your actual Reddit API credentials.
+**Note:** Replace `YOUR_REDDIT_CLIENT_ID`, `YOUR_REDDIT_CLIENT_SECRET`, `YOUR_REDDIT_USERNAME`, and `YOUR_REDDIT_PASSWORD` with your actual Reddit API credentials for `PRAW` authentication. `redditwarp` does not require explicit credential setup in the server.py or .env file as used in this project.
 
 ## Available Tools
 
@@ -94,3 +100,10 @@ Replies to a specific Reddit comment.
 -   `comment_id` (str): The ID of the comment to reply to.
 -   `text` (str): The text content of the reply.
 
+### `fetch_reddit_post_content(post_id: str, comment_limit: int = 20, comment_depth: int = 3)`
+
+Fetch detailed content of a specific post, including a recursive comment tree. This tool utilizes the `redditwarp` library.
+
+-   `post_id` (str): The ID of the Reddit post to fetch content from.
+-   `comment_limit` (int, optional): The number of top-level comments to fetch. Defaults to 20.
+-   `comment_depth` (int, optional): The maximum depth of the comment tree to traverse. Defaults to 3.
