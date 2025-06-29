@@ -2,9 +2,12 @@ from dotenv import load_dotenv
 load_dotenv()
 import os
 import praw
-from praw.models import Submission
+from praw.models import Submission, Comment
 from praw.exceptions import PRAWException
 from typing import Optional
+from redditwarp.ASYNC import Client
+from redditwarp.models.submission_ASYNC import LinkPost, TextPost, GalleryPost
+import logging
 
 # IMPORTANT: Set these environment variables before running the server:
 # REDDIT_CLIENT_ID
@@ -13,6 +16,8 @@ from typing import Optional
 # REDDIT_PASSWORD
 
 from mcp.server.fastmcp import FastMCP
+
+mcp = FastMCP("Reddit-MCP-Server") # Keep existing MCP initialization
 
 mcp = FastMCP("Reddit-MCP-Server")
 
@@ -23,7 +28,11 @@ reddit = praw.Reddit(
     password=os.environ.get("REDDIT_PASSWORD"),
     user_agent=os.environ.get("REDDIT_USER_AGENT", "reddit-mcp-server")
 )
+
+client = Client()
+logging.getLogger().setLevel(logging.WARNING)
 print(f"User Agent: {os.environ.get('REDDIT_USER_AGENT')}")
+print(f"Redditwarp Client Initialized. Log Level: {logging.getLevelName(logging.getLogger().level)}")
 
 @mcp.tool()
 def get_saved_posts(limit: int = 25, subreddit: Optional[str] = None) -> list:
@@ -135,7 +144,7 @@ def search_reddit(query: str, subreddit: Optional[str] = None, sort: str = "rele
             posts = target_subreddit.search(query, sort=sort, limit=limit)
         else:
             # Search across all of Reddit
-            posts = reddit.subreddit.search(query, sort=sort, limit=limit) # Use reddit.subreddit.search for global search
+            posts = reddit.subreddits.search(query, sort=sort, limit=limit) # Corrected for global search
 
         for post in posts:
             search_results.append({
@@ -188,14 +197,19 @@ def get_comments(submission_id: str, limit: int = 25) -> list:
         
         # Limit the comments to the specified number
         submission.comments.replace_more(limit=None) # To get all comments, not just top level
-        for comment in submission.comments.list()[:limit]:
-            comments_list.append({
-                "id": comment.id,
-                "author": comment.author.name if comment.author else "[deleted]",
-                "body": comment.body,
-                "score": comment.score,
-                "created_utc": comment.created_utc,
-            })
+        # Filter out MoreComments objects and apply limit
+        for c in submission.comments.list():
+            if isinstance(c, Comment): # Ensure it's a valid Comment object
+                comments_list.append({
+                    "id": c.id,
+                    "author": c.author.name if c.author else "[deleted]",
+                    "body": c.body,
+                    "score": c.score,
+                    "created_utc": c.created_utc,
+                })
+            # Apply limit after processing a comment
+            if len(comments_list) >= limit:
+                break
     except PRAWException as e:
         print(f"An error occurred while fetching comments: {e}")
         return []
@@ -230,11 +244,129 @@ def reply_to_comment(comment_id: str, text: str) -> str:
         comment = reddit.comment(id=comment_id)
         print(f"Attempting to reply to comment ID: {comment_id}")
         reply_object = comment.reply(body=text)
-        print(f"Successfully replied to comment ID: {comment_id}. New comment ID: {reply_object.id}")
-        return f"Successfully replied to comment. New comment ID: {reply_object.id}"
+        if reply_object: # Check if the reply operation was successful
+            print(f"Successfully replied to comment ID: {comment_id}. New comment ID: {reply_object.id}")
+            return f"Successfully replied to comment. New comment ID: {reply_object.id}"
+        else:
+            print(f"Failed to reply to comment ID: {comment_id}. Reply object was None.")
+            return f"Failed to reply to comment: The reply operation returned no object."
     except PRAWException as e:
         print(f"An error occurred while replying to comment: {e}")
         return f"Failed to reply to comment: {e}"
     except Exception as e:
         print(f"An unexpected error occurred while replying to comment: {e}")
         return f"Failed to reply to comment due to an unexpected error: {e}"
+# Helper to determine post type (adapted for synchronous PRAW)
+def _praw_get_post_type(submission: Submission) -> str:
+    """Helper method to determine post type based on PRAW Submission attributes."""
+    if submission.is_self: # Text post
+        return 'text'
+    elif submission.is_video: # Video post
+        return 'video'
+    elif submission.url and ('redd.it/gallery' in submission.url or '/gallery/' in submission.url):
+        return 'gallery'
+    elif submission.url: # Link post (includes images/other media not directly handled as gallery/video)
+        return 'link'
+    return 'unknown'
+
+# Helper to extract post content (adapted for synchronous PRAW)
+def _praw_get_content(submission: Submission) -> Optional[str]:
+    """Helper method to extract post content based on type."""
+    if submission.is_self:
+        return submission.selftext # For text posts
+    elif submission.url and not submission.is_self:
+        return submission.url # For link/video/image posts
+    return None
+
+# Helper to format comment tree synchronously (PRAW)
+def _praw_format_comment_tree(comment: Comment, indent_level: int, max_depth: int) -> str:
+    """Recursively formats a comment and its replies."""
+    if indent_level >= max_depth:
+        return ""
+
+    indent_str = "    " * indent_level
+    author = comment.author.name if comment.author else '[deleted]'
+    body = comment.body.replace('\n', '\n' + indent_str + '    ') # Indent multi-line comments
+
+    formatted_comment = f"{indent_str}- Author: {author}, Score: {comment.score}\n{indent_str}  {body}\n"
+
+    if hasattr(comment, 'replies') and comment.replies:
+        comment.replies.replace_more(limit=None) # Ensure all replies are loaded
+        for reply in comment.replies:
+            if isinstance(reply, Comment): # Make sure it's a Comment object, not MoreComments
+                formatted_comment += _praw_format_comment_tree(reply, indent_level + 1, max_depth)
+    return formatted_comment
+
+# NEW redditwarp-based functions
+def _redditwarp_format_comment_tree(comment_node, depth: int = 0) -> str:
+    """Helper method to recursively format comment tree with proper indentation for redditwarp"""
+    comment = comment_node.value
+    indent = "-- " * depth
+    content = (
+        f"{indent}* Author: {comment.author_display_name or '[deleted]'}\n"
+        f"{indent}  Score: {comment.score}\n"
+        f"{indent}  {comment.body}\n"
+    )
+
+    for child in comment_node.children:
+        content += "\n" + _redditwarp_format_comment_tree(child, depth + 1)
+
+    return content
+
+def _redditwarp_get_post_type(submission) -> str:
+    """Helper method to determine post type for redditwarp"""
+    if isinstance(submission, LinkPost):
+        return 'link'
+    elif isinstance(submission, TextPost):
+        return 'text'
+    elif isinstance(submission, GalleryPost):
+        return 'gallery'
+    return 'unknown'
+
+def _redditwarp_get_content(submission) -> Optional[str]:
+    """Helper method to extract post content based on type for redditwarp"""
+    if isinstance(submission, LinkPost):
+        return submission.permalink
+    elif isinstance(submission, TextPost):
+        return submission.body
+    elif isinstance(submission, GalleryPost):
+        return str(submission.gallery_link)
+    return None
+
+
+@mcp.tool()
+async def fetch_reddit_post_content(post_id: str, comment_limit: int = 20, comment_depth: int = 3) -> str:
+    """
+    Fetch detailed content of a specific post
+    
+    Args:
+        post_id: Reddit post ID
+        comment_limit: Number of top level comments to fetch
+        comment_depth: Maximum depth of comment tree to traverse
+
+    Returns:
+        Human readable string containing post content and comments tree
+    """
+    try:
+        submission = await client.p.submission.fetch(post_id)
+        
+        content = (
+            f"Title: {submission.title}\n"
+            f"Score: {submission.score}\n"
+            f"Author: {submission.author_display_name or '[deleted]'}\n"
+            f"Type: {_redditwarp_get_post_type(submission)}\n" # Using redditwarp specific helper
+            f"Content: {_redditwarp_get_content(submission)}\n" # Using redditwarp specific helper
+        )
+
+        comments = await client.p.comment_tree.fetch(post_id, sort='top', limit=comment_limit, depth=comment_depth)
+        if comments.children:
+            content += "\nComments:\n"
+            for comment in comments.children:
+                content += "\n" + _redditwarp_format_comment_tree(comment) # Using redditwarp specific helper
+        else:
+            content += "\nNo comments found."
+
+        return content
+
+    except Exception as e:
+        return f"An error occurred: {str(e)}"
